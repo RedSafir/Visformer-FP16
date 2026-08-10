@@ -77,10 +77,15 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch):
 
         optimizer.zero_grad()
         outputs = model(images)
-        loss = criterion(outputs, targets)
+        # Hitung loss dengan konversi logits ke float32 untuk mencegah overflow exp() pada Softmax CrossEntropy
+        loss = criterion(outputs.float(), targets)
 
-        # Backward pass murni FP16 tanpa AMP
+        # Backward pass murni FP16
         loss.backward()
+        
+        # Gradient Clipping untuk mencegah exploding gradient pada presisi FP16
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
 
         acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
@@ -111,7 +116,7 @@ def evaluate(model, criterion, data_loader, device):
         targets = targets.to(device, non_blocking=True)
 
         outputs = model(images)
-        loss = criterion(outputs, targets)
+        loss = criterion(outputs.float(), targets)
 
         acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
         batch_size = images.size(0)
