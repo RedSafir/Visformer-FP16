@@ -10,24 +10,42 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import create_transform
 
 
+class CachedImageFolder(datasets.ImageFolder):
+    """
+    Wrapper ImageFolder yang memuat seluruh file gambar ke RAM (Memory Cache).
+    Memotong latency I/O disk menjadi 0ms pada epoch 2 dan seterusnya.
+    """
+    def __init__(self, root, transform=None):
+        super().__init__(root, transform=transform)
+        print(f"[*] Memuat {len(self.samples):,} gambar ke RAM Cache...")
+        self.cache = []
+        for path, target in self.samples:
+            sample = self.loader(path)
+            self.cache.append((sample, target))
+        print(f"[✓] Berhasil menyimpan {len(self.cache):,} gambar di RAM Cache!")
+
+    def __getitem__(self, index):
+        sample, target = self.cache[index]
+        if self.transform is not None:
+            sample = self.transform(sample.copy())
+        return sample, target
+
+
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
+    use_cache = getattr(args, 'cache_ram', False)
 
     if args.data_set == 'CIFAR':
         dataset = datasets.CIFAR100(args.data_path, train=is_train, transform=transform, download=True)
         nb_classes = 100
-    elif args.data_set == 'IMNET':
+    elif args.data_set in ['IMNET', 'IMNET100', 'IMNET10']:
         root = os.path.join(args.data_path, 'train' if is_train else 'val')
-        dataset = datasets.ImageFolder(root, transform=transform)
-        nb_classes = 1000
-    elif args.data_set == 'IMNET100':
-        root = os.path.join(args.data_path, 'train' if is_train else 'val')
-        dataset = datasets.ImageFolder(root, transform=transform)
-        nb_classes = 100
-    elif args.data_set == 'IMNET10':
-        root = os.path.join(args.data_path, 'train' if is_train else 'val')
-        dataset = datasets.ImageFolder(root, transform=transform)
-        nb_classes = 10
+        if use_cache:
+            dataset = CachedImageFolder(root, transform=transform)
+        else:
+            dataset = datasets.ImageFolder(root, transform=transform)
+        
+        nb_classes = 1000 if args.data_set == 'IMNET' else (100 if args.data_set == 'IMNET100' else 10)
 
     return dataset, nb_classes
 

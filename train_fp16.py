@@ -35,6 +35,7 @@ def get_args():
     parser.add_argument('--lr', default=5e-4, type=float, help='Learning rate awal')
     parser.add_argument('--weight-decay', default=0.05, type=float, help='Weight decay AdamW')
     parser.add_argument('--workers', default=4, type=int, help='Jumlah worker DataLoader')
+    parser.add_argument('--cache-ram', action='store_true', default=False, help='Simpan seluruh dataset gambar ke RAM untuk kecepatan maksimum')
     parser.add_argument('--output-dir', default='./checkpoints_fp16', type=str, help='Direktori penyimpanan checkpoint')
     parser.add_argument('--print-freq', default=200, type=int, help='Frekuensi cetak log batch (default: setiap 200 batch)')
     
