@@ -246,7 +246,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss()
-    loss_scaler = DynamicLossScaler(init_scale=1024.0)
+    loss_scaler = DynamicLossScaler(init_scale=128.0)
 
     best_acc1 = 0.0
 

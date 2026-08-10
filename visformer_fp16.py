@@ -67,7 +67,7 @@ class FP16SafeSoftmax(nn.Module):
         x_scaled = x_float - max_val
         exp_x = torch.exp(x_scaled)
         sum_exp = torch.sum(exp_x, dim=self.dim, keepdim=True)
-        out = exp_x / torch.clamp(sum_exp + self.eps, min=1e-4)
+        out = exp_x / (sum_exp + self.eps)
         return out.to(x.dtype)
 
 
@@ -171,7 +171,7 @@ class VisFormerMlp(nn.Module):
 class VisFormerAttention(nn.Module):
     """
     Multi-Head Self-Attention (MHA) untuk tensor 2D (B, C, H, W).
-    Dilengkapi FP16SafeSoftmax dan qk_scale yang disesuaikan untuk stabilitas FP16.
+    Dilengkapi FP16SafeSoftmax, skala standar head_dim ** -0.5, dan logit clamping untuk stabilitas Pure FP16.
     """
     def __init__(
         self,
@@ -189,9 +189,8 @@ class VisFormerAttention(nn.Module):
         head_dim = max(1, round(dim // num_heads * head_dim_ratio))
         self.head_dim = head_dim
 
-        # qk_scale disesuaikan (-0.25 exponent) untuk stabilitas presisi float16
-        qk_scale_factor = qk_scale if qk_scale is not None else -0.25
-        self.scale = head_dim ** qk_scale_factor
+        # Skala Attention standar: 1 / sqrt(head_dim) = head_dim ** -0.5
+        self.scale = qk_scale if qk_scale is not None else head_dim ** -0.5
 
         self.qkv = nn.Conv2d(dim, head_dim * num_heads * 3, kernel_size=1, stride=1, padding=0, bias=qkv_bias)
         self.softmax = FP16SafeSoftmax(dim=-1, eps=1e-4)
@@ -212,13 +211,12 @@ class VisFormerAttention(nn.Module):
         v = qkv_feat[:, 2].transpose(-2, -1)  # (B, num_heads, H*W, head_dim)
 
         # Scaled Dot-Product Attention dalam FP16
-        # Matmul (q * scale) @ k^T
-        q_scaled = q * self.scale
-        k_scaled = k * self.scale
-        attn_scores = torch.matmul(q_scaled, k_scaled.transpose(-2, -1))  # (B, num_heads, H*W, H*W)
+        # Matmul q @ k^T * scale
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, num_heads, H*W, H*W)
 
-        # Clamping attn_scores pada range [-50.0, 50.0] agar aman dari FP16 exp overflow
-        attn_scores = torch.clamp(attn_scores, min=-50.0, max=50.0)
+        # Clamping attn_scores pada range [-30.0, 10.0] agar aman dari FP16 exp overflow
+        # exp(10.0) = 22026.46 << 65504 (FP16 max)
+        attn_scores = torch.clamp(attn_scores, min=-30.0, max=10.0)
 
         # Softmax stabil FP16
         attn_weights = self.softmax(attn_scores)

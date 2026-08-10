@@ -96,7 +96,7 @@ class Attention(nn.Module):
         self.head_dim = head_dim
         # self.scale = qk_scale or head_dim ** -0.5
         #new qk_scale to avoid NAN when using amp.
-        qk_scale_factor = qk_scale if qk_scale is not None else -0.25
+        qk_scale_factor = qk_scale if qk_scale is not None else -0.5
         self.scale = head_dim ** qk_scale_factor
 
         self.qkv = nn.Conv2d(dim, head_dim * num_heads * 3, 1, stride=1, padding=0, bias=qkv_bias)
