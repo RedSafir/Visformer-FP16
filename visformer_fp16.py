@@ -54,9 +54,9 @@ class FP16SafeSoftmax(nn.Module):
     """
     Softmax yang aman untuk presisi FP16.
     Mencegah overflow/underflow dengan mengoreksi max logit
-    dan menambahkan epsilon pada penyebut.
+    dan menambahkan epsilon yang aman pada penyebut.
     """
-    def __init__(self, dim: int = -1, eps: float = 1e-6):
+    def __init__(self, dim: int = -1, eps: float = 1e-4):
         super().__init__()
         self.dim = dim
         self.eps = eps
@@ -67,15 +67,15 @@ class FP16SafeSoftmax(nn.Module):
         x_scaled = x - max_val
         exp_x = torch.exp(x_scaled)
         sum_exp = torch.sum(exp_x, dim=self.dim, keepdim=True)
-        return exp_x / (sum_exp + self.eps)
+        return exp_x / torch.clamp(sum_exp + self.eps, min=1e-4)
 
 
 class FP16LayerNorm2d(nn.Module):
     """
     LayerNorm khusus untuk tensor 2D BCHW dalam FP16.
-    Menggunakan epsilon aman (eps=1e-3) untuk mencegah underflow varians.
+    Menggunakan epsilon aman (eps=1e-4) untuk mencegah underflow varians.
     """
-    def __init__(self, num_channels: int, eps: float = 1e-3):
+    def __init__(self, num_channels: int, eps: float = 1e-4):
         super().__init__()
         self.num_channels = num_channels
         self.eps = eps
@@ -86,6 +86,7 @@ class FP16LayerNorm2d(nn.Module):
         # Menghitung rata-rata dan varians sepanjang dimensi channel (dim=1)
         mean = x.mean(dim=1, keepdim=True)
         var = torch.mean((x - mean) ** 2, dim=1, keepdim=True)
+        var = torch.clamp(var, min=0.0)
         x_norm = (x - mean) / torch.sqrt(var + self.eps)
         return x_norm * self.weight + self.bias
 
@@ -190,7 +191,7 @@ class VisFormerAttention(nn.Module):
         self.scale = head_dim ** qk_scale_factor
 
         self.qkv = nn.Conv2d(dim, head_dim * num_heads * 3, kernel_size=1, stride=1, padding=0, bias=qkv_bias)
-        self.softmax = FP16SafeSoftmax(dim=-1, eps=1e-6)
+        self.softmax = FP16SafeSoftmax(dim=-1, eps=1e-4)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Conv2d(head_dim * num_heads, dim, kernel_size=1, stride=1, padding=0, bias=False)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -212,6 +213,9 @@ class VisFormerAttention(nn.Module):
         q_scaled = q * self.scale
         k_scaled = k * self.scale
         attn_scores = torch.matmul(q_scaled, k_scaled.transpose(-2, -1))  # (B, num_heads, H*W, H*W)
+
+        # Clamping attn_scores pada range [-50.0, 50.0] agar aman dari FP16 exp overflow
+        attn_scores = torch.clamp(attn_scores, min=-50.0, max=50.0)
 
         # Softmax stabil FP16
         attn_weights = self.softmax(attn_scores)
@@ -255,13 +259,13 @@ class VisFormerBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         if not attn_disabled:
-            self.norm1 = FP16LayerNorm2d(dim, eps=1e-3)
+            self.norm1 = FP16LayerNorm2d(dim, eps=1e-4)
             self.attn = VisFormerAttention(
                 dim, num_heads=num_heads, head_dim_ratio=head_dim_ratio,
                 qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop
             )
 
-        self.norm2 = FP16LayerNorm2d(dim, eps=1e-3)
+        self.norm2 = FP16LayerNorm2d(dim, eps=1e-4)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = VisFormerMlp(
             in_features=dim, hidden_features=mlp_hidden_dim, drop=drop,
@@ -289,7 +293,7 @@ class PatchEmbedFP16(nn.Module):
             )
         else:
             self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=False)
-        self.norm = FP16LayerNorm2d(embed_dim, eps=1e-3)
+        self.norm = FP16LayerNorm2d(embed_dim, eps=1e-4)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
@@ -345,7 +349,7 @@ class VisFormerFP16(nn.Module):
         curr_img_size = img_size // 2
         self.stem = nn.Sequential(
             nn.Conv2d(3, init_channels, kernel_size=7, stride=2, padding=3, bias=False),
-            FP16LayerNorm2d(init_channels, eps=1e-3),
+            FP16LayerNorm2d(init_channels, eps=1e-4),
             nn.GELU()
         )
 
@@ -406,7 +410,7 @@ class VisFormerFP16(nn.Module):
         ])
 
         # --- Head / Output Stage ---
-        self.norm = FP16LayerNorm2d(dim3, eps=1e-3)
+        self.norm = FP16LayerNorm2d(dim3, eps=1e-4)
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.head = nn.Linear(dim3, num_classes)
 

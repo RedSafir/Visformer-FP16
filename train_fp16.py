@@ -62,13 +62,58 @@ def accuracy(output, target, topk=(1, 5)):
         return res
 
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch):
+class DynamicLossScaler:
+    """
+    Manual Dynamic Loss Scaler untuk pelatihan presisi FP16 tanpa PyTorch AMP.
+    Mencegah gradient underflow dan memantau ketersediaan nilai Inf/NaN pada gradien.
+    """
+    def __init__(self, init_scale: float = 65536.0, growth_factor: float = 2.0, backoff_factor: float = 0.5, growth_interval: int = 2000):
+        self.scale = init_scale
+        self.growth_factor = growth_factor
+        self.backoff_factor = backoff_factor
+        self.growth_interval = growth_interval
+        self._successful_steps = 0
+
+    def unscale_grads_(self, model: nn.Module) -> bool:
+        """
+        Unscale gradien secara manual (grad.data.mul_(1.0 / scale_factor)) dan periksa Inf/NaN.
+        Mengembalikan True jika semua gradien valid (finite), False jika ada Inf/NaN.
+        """
+        inv_scale = 1.0 / self.scale
+        has_nan_or_inf = False
+        
+        for p in model.parameters():
+            if p.grad is not None:
+                if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                    has_nan_or_inf = True
+                    break
+                p.grad.data.mul_(inv_scale)
+                if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                    has_nan_or_inf = True
+                    break
+                    
+        return not has_nan_or_inf
+
+    def update(self, valid_grads: bool):
+        """Update scale factor secara dinamis berdasarkan keberhasilan gradien."""
+        if valid_grads:
+            self._successful_steps += 1
+            if self._successful_steps >= self.growth_interval:
+                self.scale *= self.growth_factor
+                self._successful_steps = 0
+        else:
+            self.scale = max(1.0, self.scale * self.backoff_factor)
+            self._successful_steps = 0
+
+
+def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, loss_scaler):
     model.train()
     start_time = time.time()
     running_loss = 0.0
     top1_acc = 0.0
     top5_acc = 0.0
     total_samples = 0
+    skipped_steps = 0
 
     for step, (images, targets) in enumerate(data_loader):
         # Transfer ke GPU dan konversi ke torch.float16 secara murni
@@ -80,13 +125,30 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch):
         # Hitung loss dengan konversi logits ke float32 untuk mencegah overflow exp() pada Softmax CrossEntropy
         loss = criterion(outputs.float(), targets)
 
-        # Backward pass murni FP16
-        loss.backward()
-        
-        # Gradient Clipping untuk mencegah exploding gradient pada presisi FP16
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"[WARNING] Loss NaN/Inf terdeteksi pada Batch {step+1}, melewati step.")
+            optimizer.zero_grad()
+            loss_scaler.update(valid_grads=False)
+            skipped_steps += 1
+            continue
+
+        # Dynamic Loss Scaling sebelum backward()
+        scaled_loss = loss * loss_scaler.scale
+        scaled_loss.backward()
+
+        # Unscale gradien secara manual & periksa keberadaan Inf/NaN
+        valid_grads = loss_scaler.unscale_grads_(model)
+
+        if valid_grads:
+            # Gradient Norm Clipping setelah unscaling gradien
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            loss_scaler.update(valid_grads=True)
+        else:
+            # Lewati step jika terdeteksi NaN/Inf pada gradien, bersihkan gradien, dan turunkan scale_factor
+            optimizer.zero_grad()
+            loss_scaler.update(valid_grads=False)
+            skipped_steps += 1
 
         acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
         batch_size = images.size(0)
@@ -97,9 +159,13 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch):
 
         if (step + 1) % 20 == 0 or (step + 1) == len(data_loader):
             print(f"Epoch [{epoch+1}] Batch [{step+1}/{len(data_loader)}] - "
-                  f"Loss: {loss.item():.4f} | Top-1: {acc1.item():.2f}% | Top-5: {acc5.item():.2f}%")
+                  f"Loss: {loss.item():.4f} | Scale: {loss_scaler.scale:.1f} | "
+                  f"Top-1: {acc1.item():.2f}% | Top-5: {acc5.item():.2f}%"
+                  f"{' (Skipped NaN/Inf)' if not valid_grads else ''}")
 
     epoch_time = time.time() - start_time
+    if skipped_steps > 0:
+        print(f"[INFO] Total batch dilewati pada Epoch {epoch+1} karena NaN/Inf: {skipped_steps}")
     return running_loss / total_samples, top1_acc / total_samples, top5_acc / total_samples, epoch_time
 
 
@@ -162,10 +228,11 @@ def main():
 
     print(f"Total Parameter: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 3. Optimizer & Loss Function
+    # 3. Optimizer, Loss Function, & Manual Dynamic Loss Scaler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss()
+    loss_scaler = DynamicLossScaler(init_scale=65536.0)
 
     best_acc1 = 0.0
 
@@ -173,7 +240,7 @@ def main():
     for epoch in range(args.epochs):
         print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {optimizer.param_groups[0]['lr']:.6f})")
         train_loss, train_acc1, train_acc5, epoch_time = train_one_epoch(
-            model, criterion, optimizer, train_loader, device, epoch
+            model, criterion, optimizer, train_loader, device, epoch, loss_scaler
         )
         scheduler.step()
 
