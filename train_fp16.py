@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from tqdm import tqdm
+
 from datasets import build_dataset
 from visformer_fp16 import visformer_tiny_fp16, visformer_small_fp16
 from resnet_fp16 import resnet18_fp16, resnet32_fp16, resnet56_fp16
@@ -161,8 +163,9 @@ def train_one_epoch(model, criterion, optimizer_wrapper, data_loader, device, ep
     skipped_steps = 0
 
     total_steps = len(data_loader)
+    pbar = tqdm(enumerate(data_loader), total=total_steps, desc=f"Train Epoch {epoch+1}/{total_epochs}", leave=True)
 
-    for step, (images, targets) in enumerate(data_loader):
+    for step, (images, targets) in pbar:
         # Linear Warmup pada epoch-epoch awal (5 epoch pertama)
         if epoch < warmup_epochs:
             warmup_total_steps = warmup_epochs * total_steps
@@ -183,6 +186,7 @@ def train_one_epoch(model, criterion, optimizer_wrapper, data_loader, device, ep
             optimizer_wrapper.zero_grad()
             loss_scaler.update(valid_grads=False)
             skipped_steps += 1
+            pbar.set_postfix({'loss': 'NaN/Inf', 'scale': loss_scaler.scale, 'skipped': skipped_steps})
             continue
 
         # Dynamic Loss Scaling sebelum backward()
@@ -193,6 +197,7 @@ def train_one_epoch(model, criterion, optimizer_wrapper, data_loader, device, ep
         success = optimizer_wrapper.step(loss_scaler, max_norm=1.0)
         if not success:
             skipped_steps += 1
+            pbar.set_postfix({'loss': 'GradNaN', 'scale': loss_scaler.scale, 'skipped': skipped_steps})
             continue
 
         acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
@@ -202,10 +207,11 @@ def train_one_epoch(model, criterion, optimizer_wrapper, data_loader, device, ep
         top1_acc += acc1.item() * batch_size
         top5_acc += acc5.item() * batch_size
 
-        if (step + 1) % print_freq == 0 or (step + 1) == len(data_loader):
-            print(f"Epoch [{epoch+1}/{total_epochs}] Batch [{step+1}/{len(data_loader)}] - "
-                  f"Loss: {loss.item():.4f} | Scale: {loss_scaler.scale:.1f} | "
-                  f"Top-1: {acc1.item():.2f}% | Top-5: {acc5.item():.2f}%")
+        pbar.set_postfix({
+            'loss': f"{loss.item():.4f}",
+            'top1': f"{acc1.item():.1f}%",
+            'scale': f"{loss_scaler.scale:.0f}"
+        })
 
     epoch_time = time.time() - start_time
     if skipped_steps > 0:
@@ -225,7 +231,8 @@ def evaluate(model, criterion, data_loader, device):
     top5_acc = 0.0
     total_samples = 0
 
-    for images, targets in data_loader:
+    pbar = tqdm(data_loader, desc="Evaluating", leave=False)
+    for images, targets in pbar:
         images = images.to(device, dtype=torch.float16, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -238,6 +245,11 @@ def evaluate(model, criterion, data_loader, device):
         running_loss += loss.item() * batch_size
         top1_acc += acc1.item() * batch_size
         top5_acc += acc5.item() * batch_size
+
+        pbar.set_postfix({
+            'val_loss': f"{loss.item():.4f}",
+            'val_top1': f"{acc1.item():.1f}%"
+        })
 
     return running_loss / total_samples, top1_acc / total_samples, top5_acc / total_samples
 
