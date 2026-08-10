@@ -67,7 +67,7 @@ class DynamicLossScaler:
     Manual Dynamic Loss Scaler untuk pelatihan presisi FP16 tanpa PyTorch AMP.
     Mencegah gradient underflow dan memantau ketersediaan nilai Inf/NaN pada gradien.
     """
-    def __init__(self, init_scale: float = 65536.0, growth_factor: float = 2.0, backoff_factor: float = 0.5, growth_interval: int = 2000):
+    def __init__(self, init_scale: float = 1024.0, growth_factor: float = 2.0, backoff_factor: float = 0.5, growth_interval: int = 2000):
         self.scale = init_scale
         self.growth_factor = growth_factor
         self.backoff_factor = backoff_factor
@@ -76,23 +76,28 @@ class DynamicLossScaler:
 
     def unscale_grads_(self, model: nn.Module) -> bool:
         """
-        Unscale gradien secara manual (grad.data.mul_(1.0 / scale_factor)) dan periksa Inf/NaN.
+        Unscale gradien secara manual (grad.data.mul_(1.0 / scale_factor)) setelah memverifikasi
+        bahwa TIDAK ADA gradien yang memuat NaN atau Inf.
         Mengembalikan True jika semua gradien valid (finite), False jika ada Inf/NaN.
         """
-        inv_scale = 1.0 / self.scale
+        # Step 1: Periksa seluruh gradien terlebih dahulu tanpa mengubah state tensor
         has_nan_or_inf = False
-        
         for p in model.parameters():
             if p.grad is not None:
                 if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
                     has_nan_or_inf = True
                     break
+
+        if has_nan_or_inf:
+            return False
+
+        # Step 2: Jika seluruh gradien terhingga, lakukan unscaling secara in-place
+        inv_scale = 1.0 / self.scale
+        for p in model.parameters():
+            if p.grad is not None:
                 p.grad.data.mul_(inv_scale)
-                if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
-                    has_nan_or_inf = True
-                    break
-                    
-        return not has_nan_or_inf
+
+        return True
 
     def update(self, valid_grads: bool):
         """Update scale factor secara dinamis berdasarkan keberhasilan gradien."""
@@ -106,7 +111,7 @@ class DynamicLossScaler:
             self._successful_steps = 0
 
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, loss_scaler):
+def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, loss_scaler, warmup_epochs=5, base_lr=5e-4):
     model.train()
     start_time = time.time()
     running_loss = 0.0
@@ -115,7 +120,17 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, los
     total_samples = 0
     skipped_steps = 0
 
+    total_steps = len(data_loader)
+
     for step, (images, targets) in enumerate(data_loader):
+        # Linear Warmup pada epoch-epoch awal (5 epoch pertama) untuk kestabilan awal ViT FP16
+        if epoch < warmup_epochs:
+            warmup_total_steps = warmup_epochs * total_steps
+            current_step = epoch * total_steps + step
+            lr = base_lr * (current_step + 1) / warmup_total_steps
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+
         # Transfer ke GPU dan konversi ke torch.float16 secara murni
         images = images.to(device, dtype=torch.float16, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -232,7 +247,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss()
-    loss_scaler = DynamicLossScaler(init_scale=65536.0)
+    loss_scaler = DynamicLossScaler(init_scale=1024.0)
 
     best_acc1 = 0.0
 
@@ -240,7 +255,7 @@ def main():
     for epoch in range(args.epochs):
         print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {optimizer.param_groups[0]['lr']:.6f})")
         train_loss, train_acc1, train_acc5, epoch_time = train_one_epoch(
-            model, criterion, optimizer, train_loader, device, epoch, loss_scaler
+            model, criterion, optimizer, train_loader, device, epoch, loss_scaler, warmup_epochs=5, base_lr=args.lr
         )
         scheduler.step()
 

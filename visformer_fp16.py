@@ -53,8 +53,8 @@ class DropPath(nn.Module):
 class FP16SafeSoftmax(nn.Module):
     """
     Softmax yang aman untuk presisi FP16.
-    Mencegah overflow/underflow dengan mengoreksi max logit
-    dan menambahkan epsilon yang aman pada penyebut.
+    Melakukan akumulasi dan pembagian internal dalam float32
+    untuk mencegah overflow exp() dan underflow penyebut pada FP16.
     """
     def __init__(self, dim: int = -1, eps: float = 1e-4):
         super().__init__()
@@ -62,18 +62,20 @@ class FP16SafeSoftmax(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Kurangi nilai maksimum untuk mencegah overflow exp() pada FP16 (max FP16 ~ 65504)
-        max_val = torch.max(x, dim=self.dim, keepdim=True).values
-        x_scaled = x - max_val
+        x_float = x.float()
+        max_val = torch.max(x_float, dim=self.dim, keepdim=True).values
+        x_scaled = x_float - max_val
         exp_x = torch.exp(x_scaled)
         sum_exp = torch.sum(exp_x, dim=self.dim, keepdim=True)
-        return exp_x / torch.clamp(sum_exp + self.eps, min=1e-4)
+        out = exp_x / torch.clamp(sum_exp + self.eps, min=1e-4)
+        return out.to(x.dtype)
 
 
 class FP16LayerNorm2d(nn.Module):
     """
     LayerNorm khusus untuk tensor 2D BCHW dalam FP16.
-    Menggunakan epsilon aman (eps=1e-4) untuk mencegah underflow varians.
+    Mengakumulasi mean dan varians dalam float32 untuk mencegah overflow (max 65504)
+    saat kuadrat selisih diakumulasi pada banyak channel.
     """
     def __init__(self, num_channels: int, eps: float = 1e-4):
         super().__init__()
@@ -83,11 +85,12 @@ class FP16LayerNorm2d(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1, num_channels, 1, 1, dtype=torch.float16))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Menghitung rata-rata dan varians sepanjang dimensi channel (dim=1)
-        mean = x.mean(dim=1, keepdim=True)
-        var = torch.mean((x - mean) ** 2, dim=1, keepdim=True)
+        x_float = x.float()
+        mean = x_float.mean(dim=1, keepdim=True)
+        var = torch.mean((x_float - mean) ** 2, dim=1, keepdim=True)
         var = torch.clamp(var, min=0.0)
-        x_norm = (x - mean) / torch.sqrt(var + self.eps)
+        x_norm = (x_float - mean) / torch.sqrt(var + self.eps)
+        x_norm = x_norm.to(x.dtype)
         return x_norm * self.weight + self.bias
 
 
