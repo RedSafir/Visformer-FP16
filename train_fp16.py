@@ -70,37 +70,12 @@ class DynamicLossScaler:
     Manual Dynamic Loss Scaler untuk pelatihan presisi FP16 tanpa PyTorch AMP.
     Mencegah gradient underflow dan memantau ketersediaan nilai Inf/NaN pada gradien.
     """
-    def __init__(self, init_scale: float = 1024.0, growth_factor: float = 2.0, backoff_factor: float = 0.5, growth_interval: int = 2000):
+    def __init__(self, init_scale: float = 128.0, growth_factor: float = 2.0, backoff_factor: float = 0.5, growth_interval: int = 2000):
         self.scale = init_scale
         self.growth_factor = growth_factor
         self.backoff_factor = backoff_factor
         self.growth_interval = growth_interval
         self._successful_steps = 0
-
-    def unscale_grads_(self, model: nn.Module) -> bool:
-        """
-        Unscale gradien secara manual (grad.data.mul_(1.0 / scale_factor)) setelah memverifikasi
-        bahwa TIDAK ADA gradien yang memuat NaN atau Inf.
-        Mengembalikan True jika semua gradien valid (finite), False jika ada Inf/NaN.
-        """
-        # Step 1: Periksa seluruh gradien terlebih dahulu tanpa mengubah state tensor
-        has_nan_or_inf = False
-        for p in model.parameters():
-            if p.grad is not None:
-                if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
-                    has_nan_or_inf = True
-                    break
-
-        if has_nan_or_inf:
-            return False
-
-        # Step 2: Jika seluruh gradien terhingga, lakukan unscaling secara in-place
-        inv_scale = 1.0 / self.scale
-        for p in model.parameters():
-            if p.grad is not None:
-                p.grad.data.mul_(inv_scale)
-
-        return True
 
     def update(self, valid_grads: bool):
         """Update scale factor secara dinamis berdasarkan keberhasilan gradien."""
@@ -114,7 +89,69 @@ class DynamicLossScaler:
             self._successful_steps = 0
 
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, total_epochs, loss_scaler, warmup_epochs=5, base_lr=5e-4, print_freq=200):
+class FP16OptimizerWrapper:
+    """
+    Wrapper Optimizer untuk Pelatihan Presisi 16-bit Murni (Tanpa AMP).
+    Mempertahankan FP32 Master Weights untuk optimizer AdamW agar v_t tidak underflow.
+    """
+    def __init__(self, model: nn.Module, base_optimizer_cls, lr: float = 5e-4, weight_decay: float = 0.05):
+        self.model = model
+        # Master weights dalam FP32
+        self.master_params = [
+            p.detach().clone().float().requires_grad_() for p in model.parameters()
+        ]
+        self.optimizer = base_optimizer_cls(self.master_params, lr=lr, weight_decay=weight_decay)
+        self.param_map = list(zip(list(model.parameters()), self.master_params))
+
+    def zero_grad(self):
+        self.optimizer.zero_grad()
+        for p in self.model.parameters():
+            if p.grad is not None:
+                p.grad.detach_()
+                p.grad.zero_()
+
+    def step(self, loss_scaler, max_norm: float = 1.0) -> bool:
+        # Step 1: Periksa apakah ada NaN/Inf pada gradien FP16 model
+        has_nan_or_inf = False
+        for p_model, _ in self.param_map:
+            if p_model.grad is not None:
+                if torch.isnan(p_model.grad).any() or torch.isinf(p_model.grad).any():
+                    has_nan_or_inf = True
+                    break
+
+        if has_nan_or_inf:
+            loss_scaler.update(valid_grads=False)
+            self.zero_grad()
+            return False
+
+        # Step 2: Salin & unscale gradien FP16 model ke master_params FP32
+        inv_scale = 1.0 / loss_scaler.scale
+        for p_model, p_master in self.param_map:
+            if p_model.grad is not None:
+                p_master.grad = p_model.grad.float() * inv_scale
+            else:
+                p_master.grad = None
+
+        # Step 3: Gradient Norm Clipping pada master parameters FP32
+        torch.nn.utils.clip_grad_norm_(self.master_params, max_norm=max_norm)
+
+        # Step 4: Optimizer step pada FP32 Master Weights
+        self.optimizer.step()
+        loss_scaler.update(valid_grads=True)
+
+        # Step 5: Salin kembali master weights FP32 yang diperbarui ke FP16 model
+        with torch.no_grad():
+            for p_model, p_master in self.param_map:
+                p_model.copy_(p_master.half())
+
+        return True
+
+    @property
+    def param_groups(self):
+        return self.optimizer.param_groups
+
+
+def train_one_epoch(model, criterion, optimizer_wrapper, data_loader, device, epoch, total_epochs, loss_scaler, warmup_epochs=5, base_lr=5e-4, print_freq=200):
     model.train()
     start_time = time.time()
     running_loss = 0.0
@@ -126,25 +163,24 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, tot
     total_steps = len(data_loader)
 
     for step, (images, targets) in enumerate(data_loader):
-        # Linear Warmup pada epoch-epoch awal (5 epoch pertama) untuk kestabilan awal ViT FP16
+        # Linear Warmup pada epoch-epoch awal (5 epoch pertama)
         if epoch < warmup_epochs:
             warmup_total_steps = warmup_epochs * total_steps
             current_step = epoch * total_steps + step
             lr = base_lr * (current_step + 1) / warmup_total_steps
-            for param_group in optimizer.param_groups:
+            for param_group in optimizer_wrapper.param_groups:
                 param_group['lr'] = lr
 
         # Transfer ke GPU dan konversi ke torch.float16 secara murni
         images = images.to(device, dtype=torch.float16, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
+        optimizer_wrapper.zero_grad()
         outputs = model(images)
-        # Hitung loss dengan konversi logits ke float32 untuk mencegah overflow exp() pada Softmax CrossEntropy
         loss = criterion(outputs.float(), targets)
 
         if torch.isnan(loss) or torch.isinf(loss):
-            optimizer.zero_grad()
+            optimizer_wrapper.zero_grad()
             loss_scaler.update(valid_grads=False)
             skipped_steps += 1
             continue
@@ -153,19 +189,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, tot
         scaled_loss = loss * loss_scaler.scale
         scaled_loss.backward()
 
-        # Unscale gradien secara manual & periksa keberadaan Inf/NaN
-        valid_grads = loss_scaler.unscale_grads_(model)
-
-        if valid_grads:
-            # Gradient Norm Clipping setelah unscaling gradien
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            loss_scaler.update(valid_grads=True)
-        else:
-            # Lewati step jika terdeteksi NaN/Inf pada gradien, bersihkan gradien, dan turunkan scale_factor
-            optimizer.zero_grad()
-            loss_scaler.update(valid_grads=False)
+        # Step optimizer dengan master weights FP32
+        success = optimizer_wrapper.step(loss_scaler, max_norm=1.0)
+        if not success:
             skipped_steps += 1
+            continue
 
         acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
         batch_size = images.size(0)
@@ -182,6 +210,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, tot
     epoch_time = time.time() - start_time
     if skipped_steps > 0:
         print(f"[INFO] Total batch dilewati pada Epoch {epoch+1} karena NaN/Inf: {skipped_steps}")
+
+    if total_samples == 0:
+        return 0.0, 0.0, 0.0, epoch_time
+
     return running_loss / total_samples, top1_acc / total_samples, top5_acc / total_samples, epoch_time
 
 
@@ -254,8 +286,8 @@ def main():
     print(f"Total Parameter: {sum(p.numel() for p in model.parameters()):,}")
 
     # 3. Optimizer, Loss Function, & Manual Dynamic Loss Scaler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+    optimizer_wrapper = FP16OptimizerWrapper(model, torch.optim.AdamW, lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_wrapper.optimizer, T_max=args.epochs, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss()
     loss_scaler = DynamicLossScaler(init_scale=128.0)
 
@@ -263,9 +295,9 @@ def main():
 
     # 4. Training Loop
     for epoch in range(args.epochs):
-        print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {optimizer.param_groups[0]['lr']:.6f})")
+        print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {optimizer_wrapper.param_groups[0]['lr']:.6f})")
         train_loss, train_acc1, train_acc5, epoch_time = train_one_epoch(
-            model, criterion, optimizer, train_loader, device, epoch, args.epochs, loss_scaler, warmup_epochs=5, base_lr=args.lr, print_freq=args.print_freq
+            model, criterion, optimizer_wrapper, train_loader, device, epoch, args.epochs, loss_scaler, warmup_epochs=5, base_lr=args.lr, print_freq=args.print_freq
         )
         scheduler.step()
 
