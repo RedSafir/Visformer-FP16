@@ -32,6 +32,7 @@ def get_args():
     parser.add_argument('--weight-decay', default=0.05, type=float, help='Weight decay AdamW')
     parser.add_argument('--workers', default=4, type=int, help='Jumlah worker DataLoader')
     parser.add_argument('--output-dir', default='./checkpoints_fp16', type=str, help='Direktori penyimpanan checkpoint')
+    parser.add_argument('--print-freq', default=200, type=int, help='Frekuensi cetak log batch (default: setiap 200 batch)')
     
     # Dummy args agar kompatibel dengan timm / datasets.py
     parser.add_argument('--std-aug', action='store_true', default=False)
@@ -111,7 +112,7 @@ class DynamicLossScaler:
             self._successful_steps = 0
 
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, loss_scaler, warmup_epochs=5, base_lr=5e-4):
+def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, total_epochs, loss_scaler, warmup_epochs=5, base_lr=5e-4, print_freq=200):
     model.train()
     start_time = time.time()
     running_loss = 0.0
@@ -141,7 +142,6 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, los
         loss = criterion(outputs.float(), targets)
 
         if torch.isnan(loss) or torch.isinf(loss):
-            print(f"[WARNING] Loss NaN/Inf terdeteksi pada Batch {step+1}, melewati step.")
             optimizer.zero_grad()
             loss_scaler.update(valid_grads=False)
             skipped_steps += 1
@@ -172,11 +172,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, los
         top1_acc += acc1.item() * batch_size
         top5_acc += acc5.item() * batch_size
 
-        if (step + 1) % 20 == 0 or (step + 1) == len(data_loader):
-            print(f"Epoch [{epoch+1}] Batch [{step+1}/{len(data_loader)}] - "
+        if (step + 1) % print_freq == 0 or (step + 1) == len(data_loader):
+            print(f"Epoch [{epoch+1}/{total_epochs}] Batch [{step+1}/{len(data_loader)}] - "
                   f"Loss: {loss.item():.4f} | Scale: {loss_scaler.scale:.1f} | "
-                  f"Top-1: {acc1.item():.2f}% | Top-5: {acc5.item():.2f}%"
-                  f"{' (Skipped NaN/Inf)' if not valid_grads else ''}")
+                  f"Top-1: {acc1.item():.2f}% | Top-5: {acc5.item():.2f}%")
 
     epoch_time = time.time() - start_time
     if skipped_steps > 0:
@@ -255,7 +254,7 @@ def main():
     for epoch in range(args.epochs):
         print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {optimizer.param_groups[0]['lr']:.6f})")
         train_loss, train_acc1, train_acc5, epoch_time = train_one_epoch(
-            model, criterion, optimizer, train_loader, device, epoch, loss_scaler, warmup_epochs=5, base_lr=args.lr
+            model, criterion, optimizer, train_loader, device, epoch, args.epochs, loss_scaler, warmup_epochs=5, base_lr=args.lr, print_freq=args.print_freq
         )
         scheduler.step()
 
