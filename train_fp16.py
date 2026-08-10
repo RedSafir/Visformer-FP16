@@ -15,16 +15,18 @@ from torch.utils.data import DataLoader
 
 from datasets import build_dataset
 from visformer_fp16 import visformer_tiny_fp16, visformer_small_fp16
+from resnet_fp16 import resnet18_fp16, resnet32_fp16, resnet56_fp16
 
 
 def get_args():
-    parser = argparse.ArgumentParser('Pelatihan VisFormer FP16 pada ImageNet-100', add_help=True)
+    parser = argparse.ArgumentParser('Pelatihan Model FP16 pada ImageNet-100', add_help=True)
     parser.add_argument('--data-path', default='./imagenet100', type=str,
                         help='Path ke direktori dataset (berisi folder train/ dan val/)')
     parser.add_argument('--data-set', default='IMNET100', type=str, choices=['IMNET100', 'IMNET', 'IMNET10', 'CIFAR'],
                         help='Nama dataset (default: IMNET100)')
-    parser.add_argument('--model', default='visformer_tiny_fp16', type=str, choices=['visformer_tiny_fp16', 'visformer_small_fp16'],
-                        help='Varian arsitektur model VisFormer FP16')
+    parser.add_argument('--model', default='visformer_tiny_fp16', type=str, 
+                        choices=['visformer_tiny_fp16', 'visformer_small_fp16', 'resnet18_fp16', 'resnet32_fp16', 'resnet56_fp16'],
+                        help='Varian arsitektur model FP16 (VisFormer atau ResNet)')
     parser.add_argument('--batch-size', default=64, type=int, help='Ukuran batch per GPU')
     parser.add_argument('--epochs', default=100, type=int, help='Jumlah epoch pelatihan')
     parser.add_argument('--input-size', default=224, type=int, help='Resolusi gambar masukan (224x224)')
@@ -234,11 +236,20 @@ def main():
 
     print(f"Jumlah sampel Train: {len(dataset_train)} | Val: {len(dataset_val)} | Kelas: {nb_classes}")
 
-    # 2. Build VisFormer FP16 Model
+    # 2. Build FP16 Model
+    is_cifar = (args.data_set == 'CIFAR')
     if args.model == 'visformer_tiny_fp16':
         model = visformer_tiny_fp16(num_classes=nb_classes).to(device)
-    else:
+    elif args.model == 'visformer_small_fp16':
         model = visformer_small_fp16(num_classes=nb_classes).to(device)
+    elif args.model == 'resnet18_fp16':
+        model = resnet18_fp16(num_classes=nb_classes, is_cifar=is_cifar).to(device)
+    elif args.model == 'resnet32_fp16':
+        model = resnet32_fp16(num_classes=nb_classes, is_cifar=is_cifar).to(device)
+    elif args.model == 'resnet56_fp16':
+        model = resnet56_fp16(num_classes=nb_classes, is_cifar=is_cifar).to(device)
+    else:
+        raise ValueError(f"Model tidak dikenal: {args.model}")
 
     print(f"Total Parameter: {sum(p.numel() for p in model.parameters()):,}")
 
