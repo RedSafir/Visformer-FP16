@@ -112,6 +112,27 @@ class FP16OptimizerWrapper:
                 p.grad.detach_()
                 p.grad.zero_()
 
+class FP16OptimizerWrapper:
+    """
+    Wrapper Optimizer untuk Pelatihan Presisi 16-bit Murni (Tanpa AMP).
+    Mempertahankan FP32 Master Weights untuk optimizer AdamW agar v_t tidak underflow.
+    """
+    def __init__(self, model: nn.Module, base_optimizer_cls, lr: float = 5e-4, weight_decay: float = 0.05):
+        self.model = model
+        # Master weights dalam FP32
+        self.master_params = [
+            p.detach().clone().float().requires_grad_() for p in model.parameters()
+        ]
+        self.optimizer = base_optimizer_cls(self.master_params, lr=lr, weight_decay=weight_decay)
+        self.param_map = list(zip(list(model.parameters()), self.master_params))
+
+    def zero_grad(self):
+        self.optimizer.zero_grad()
+        for p_model, _ in self.param_map:
+            if p_model.grad is not None:
+                p_model.grad.detach_()
+                p_model.grad.zero_()
+
     def step(self, loss_scaler, max_norm: float = 1.0) -> bool:
         # Step 1: Periksa apakah ada NaN/Inf pada gradien FP16 model
         has_nan_or_inf = False
@@ -126,11 +147,13 @@ class FP16OptimizerWrapper:
             self.zero_grad()
             return False
 
-        # Step 2: Salin & unscale gradien FP16 model ke master_params FP32
+        # Step 2: Salin & unscale gradien FP16 model ke master_params FP32 tanpa alokasi memori baru
         inv_scale = 1.0 / loss_scaler.scale
         for p_model, p_master in self.param_map:
             if p_model.grad is not None:
-                p_master.grad = p_model.grad.float() * inv_scale
+                if p_master.grad is None:
+                    p_master.grad = torch.empty_like(p_master)
+                p_master.grad.copy_(p_model.grad).mul_(inv_scale)
             else:
                 p_master.grad = None
 
