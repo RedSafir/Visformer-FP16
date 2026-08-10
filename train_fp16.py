@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from datasets import build_dataset
 from visformer_fp16 import visformer_tiny_fp16, visformer_small_fp16
-from resnet_fp16 import resnet18_fp16, resnet32_fp16, resnet56_fp16
+from resnet_fp16 import resnet18_fp16, resnet32_fp16, resnet32_cifar_fp16, resnet56_fp16
 
 
 def get_args():
@@ -27,7 +27,7 @@ def get_args():
     parser.add_argument('--data-set', default='IMNET100', type=str, choices=['IMNET100', 'IMNET', 'IMNET10', 'CIFAR'],
                         help='Nama dataset (default: IMNET100)')
     parser.add_argument('--model', default='visformer_tiny_fp16', type=str, 
-                        choices=['visformer_tiny_fp16', 'visformer_small_fp16', 'resnet18_fp16', 'resnet32_fp16', 'resnet56_fp16'],
+                        choices=['visformer_tiny_fp16', 'visformer_small_fp16', 'resnet18_fp16', 'resnet32_fp16', 'resnet32_cifar_fp16', 'resnet56_fp16'],
                         help='Varian arsitektur model FP16 (VisFormer atau ResNet)')
     parser.add_argument('--batch-size', default=64, type=int, help='Ukuran batch per GPU')
     parser.add_argument('--epochs', default=100, type=int, help='Jumlah epoch pelatihan')
@@ -258,6 +258,8 @@ def main():
     args = get_args()
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True  # Optimisasi kecepatan konvolusi GPU
     print(f"=== Pelatihan VisFormer FP16 ===")
     print(f"Device: {device}")
     print(f"Dataset: {args.data_set} | Path: {args.data_path}")
@@ -290,6 +292,8 @@ def main():
         model = resnet18_fp16(num_classes=nb_classes, is_cifar=is_cifar).to(device)
     elif args.model == 'resnet32_fp16':
         model = resnet32_fp16(num_classes=nb_classes, is_cifar=is_cifar).to(device)
+    elif args.model == 'resnet32_cifar_fp16':
+        model = resnet32_cifar_fp16(num_classes=nb_classes).to(device)
     elif args.model == 'resnet56_fp16':
         model = resnet56_fp16(num_classes=nb_classes, is_cifar=is_cifar).to(device)
     else:

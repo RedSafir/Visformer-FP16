@@ -164,6 +164,11 @@ def resnet32_fp16(num_classes: int = 1000, is_cifar: bool = False, **kwargs) -> 
     return ResNetFP16(BasicBlockFP16, [5, 5, 5, 5] if not is_cifar else [5, 5, 5], num_classes=num_classes, is_cifar=is_cifar)
 
 
+def resnet32_cifar_fp16(num_classes: int = 1000, **kwargs) -> ResNetFP16:
+    """ResNet-32 FP16 Versi Ringan (Channel 16->32->64 seperti pada repo YUNBLAK ~0.46M param)."""
+    return ResNetFP16(BasicBlockFP16, [5, 5, 5], num_classes=num_classes, is_cifar=True)
+
+
 def resnet56_fp16(num_classes: int = 1000, is_cifar: bool = False, **kwargs) -> ResNetFP16:
-    """ResNet-56 FP16 Murni (seperti pada repo YUNBLAK/standalone_16bits_nn)."""
+    """ResNet-56 FP16 Murni."""
     return ResNetFP16(BasicBlockFP16, [9, 9, 9, 9] if not is_cifar else [9, 9, 9], num_classes=num_classes, is_cifar=is_cifar)
