@@ -9,6 +9,7 @@ import argparse
 import time
 import os
 import datetime
+import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -332,10 +333,16 @@ def main():
     loss_scaler = DynamicLossScaler(init_scale=128.0)
 
     best_acc1 = 0.0
+    history_log = {
+        "config": vars(args),
+        "history": []
+    }
+    json_save_path = os.path.join(args.output_dir, f"{args.model}_history.json")
 
     # 4. Training Loop
     for epoch in range(args.epochs):
-        print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {optimizer_wrapper.param_groups[0]['lr']:.6f})")
+        current_lr = optimizer_wrapper.param_groups[0]['lr']
+        print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {current_lr:.6f})")
         train_loss, train_acc1, train_acc5, epoch_time = train_one_epoch(
             model, criterion, optimizer_wrapper, train_loader, device, epoch, args.epochs, loss_scaler, warmup_epochs=5, base_lr=args.lr, print_freq=args.print_freq
         )
@@ -346,6 +353,25 @@ def main():
         print(f"Hasil Epoch {epoch+1} ({epoch_time:.1f}s):")
         print(f"  Train -> Loss: {train_loss:.4f} | Top-1: {train_acc1:.2f}% | Top-5: {train_acc5:.2f}%")
         print(f"  Val   -> Loss: {val_loss:.4f} | Top-1: {val_acc1:.2f}% | Top-5: {val_acc5:.2f}%")
+
+        # Record epoch metrics for JSON analysis
+        epoch_metrics = {
+            "epoch": epoch + 1,
+            "lr": round(float(current_lr), 7),
+            "train_loss": round(float(train_loss), 4),
+            "train_top1": round(float(train_acc1), 2),
+            "train_top5": round(float(train_acc5), 2),
+            "val_loss": round(float(val_loss), 4),
+            "val_top1": round(float(val_acc1), 2),
+            "val_top5": round(float(val_acc5), 2),
+            "epoch_time_sec": round(float(epoch_time), 1)
+        }
+        history_log["history"].append(epoch_metrics)
+
+        # Simpan/update file JSON setiap epoch selesai
+        with open(json_save_path, 'w') as f:
+            json.dump(history_log, f, indent=2)
+        print(f"  [✓] Log riwayat pelatihan diperbarui di: {json_save_path}")
 
         # Simpan checkpoint terbaik
         if val_acc1 > best_acc1:
@@ -360,6 +386,7 @@ def main():
             print(f"  [✓] Checkpoint terbaik disimpan di: {save_path} (Val Top-1: {best_acc1:.2f}%)")
 
     print(f"\n=== Pelatihan Selesai! Top-1 Akurasi Terbaik: {best_acc1:.2f}% ===")
+    print(f"File log JSON lengkap untuk analisis: {json_save_path}")
 
 
 if __name__ == '__main__':
