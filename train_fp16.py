@@ -243,9 +243,9 @@ def train_one_epoch(model, criterion, optimizer_wrapper, data_loader, device, ep
         print(f"[INFO] Total batch dilewati pada Epoch {epoch+1} karena NaN/Inf: {skipped_steps}")
 
     if total_samples == 0:
-        return 0.0, 0.0, 0.0, epoch_time
+        return 0.0, 0.0, 0.0, epoch_time, skipped_steps
 
-    return running_loss / total_samples, top1_acc / total_samples, top5_acc / total_samples, epoch_time
+    return running_loss / total_samples, top1_acc / total_samples, top5_acc / total_samples, epoch_time, skipped_steps
 
 
 @torch.no_grad()
@@ -343,7 +343,7 @@ def main():
     for epoch in range(args.epochs):
         current_lr = optimizer_wrapper.param_groups[0]['lr']
         print(f"\n--- Epoch {epoch+1}/{args.epochs} --- (LR: {current_lr:.6f})")
-        train_loss, train_acc1, train_acc5, epoch_time = train_one_epoch(
+        train_loss, train_acc1, train_acc5, epoch_time, skipped_steps = train_one_epoch(
             model, criterion, optimizer_wrapper, train_loader, device, epoch, args.epochs, loss_scaler, warmup_epochs=5, base_lr=args.lr, print_freq=args.print_freq
         )
         scheduler.step()
@@ -364,7 +364,8 @@ def main():
             "val_loss": round(float(val_loss), 4),
             "val_top1": round(float(val_acc1), 2),
             "val_top5": round(float(val_acc5), 2),
-            "epoch_time_sec": round(float(epoch_time), 1)
+            "epoch_time_sec": round(float(epoch_time), 1),
+            "skipped_steps": int(skipped_steps)
         }
         history_log["history"].append(epoch_metrics)
 
