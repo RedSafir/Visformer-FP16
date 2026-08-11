@@ -31,6 +31,4 @@ imagenet100_data/
 
 # Temporary / Log files
 *.log
-logs/
-logs_fp16/
 scratch/
