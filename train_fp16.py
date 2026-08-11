@@ -37,7 +37,8 @@ def get_args():
     parser.add_argument('--weight-decay', default=0.05, type=float, help='Weight decay AdamW')
     parser.add_argument('--workers', default=4, type=int, help='Jumlah worker DataLoader')
     parser.add_argument('--cache-ram', action='store_true', default=False, help='Simpan seluruh dataset gambar ke RAM untuk kecepatan maksimum')
-    parser.add_argument('--output-dir', default='./checkpoints_fp16', type=str, help='Direktori penyimpanan checkpoint')
+    parser.add_argument('--output-dir', default='./checkpoints_fp16', type=str, help='Direktori penyimpanan checkpoint bobot model (.pth)')
+    parser.add_argument('--log-dir', default='./logs_fp16', type=str, help='Direktori penyimpanan file log analisis JSON (.json)')
     parser.add_argument('--print-freq', default=200, type=int, help='Frekuensi cetak log batch (default: setiap 200 batch)')
     
     # Dummy args agar kompatibel dengan timm / datasets.py
@@ -282,6 +283,7 @@ def evaluate(model, criterion, data_loader, device):
 def main():
     args = get_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True  # Optimisasi kecepatan konvolusi GPU
@@ -337,7 +339,7 @@ def main():
         "config": vars(args),
         "history": []
     }
-    json_save_path = os.path.join(args.output_dir, f"{args.model}_history.json")
+    json_save_path = os.path.join(args.log_dir, f"{args.model}_history.json")
 
     # 4. Training Loop
     for epoch in range(args.epochs):
