@@ -181,13 +181,15 @@ class VisFormerAttention(nn.Module):
         qkv_bias: bool = False,
         qk_scale: float = None,
         attn_drop: float = 0.0,
-        proj_drop: float = 0.0
+        proj_drop: float = 0.0,
+        use_logit_clamp: bool = True
     ):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         head_dim = max(1, round(dim // num_heads * head_dim_ratio))
         self.head_dim = head_dim
+        self.use_logit_clamp = use_logit_clamp
 
         # Skala Attention standar: 1 / sqrt(head_dim) = head_dim ** -0.5
         self.scale = qk_scale if qk_scale is not None else head_dim ** -0.5
@@ -214,9 +216,9 @@ class VisFormerAttention(nn.Module):
         # Matmul q @ k^T * scale
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, num_heads, H*W, H*W)
 
-        # Clamping attn_scores pada range [-30.0, 10.0] agar aman dari FP16 exp overflow
-        # exp(10.0) = 22026.46 << 65504 (FP16 max)
-        attn_scores = torch.clamp(attn_scores, min=-30.0, max=10.0)
+        # Logit clamping (opsional): [-30.0, 10.0] agar aman dari FP16 exp overflow
+        if self.use_logit_clamp:
+            attn_scores = torch.clamp(attn_scores, min=-30.0, max=10.0)
 
         # Softmax stabil FP16
         attn_weights = self.softmax(attn_scores)
@@ -252,7 +254,8 @@ class VisFormerBlock(nn.Module):
         drop_path: float = 0.0,
         group: int = 8,
         attn_disabled: bool = False,
-        spatial_conv: bool = False
+        spatial_conv: bool = False,
+        use_logit_clamp: bool = True
     ):
         super().__init__()
         self.attn_disabled = attn_disabled
@@ -263,7 +266,8 @@ class VisFormerBlock(nn.Module):
             self.norm1 = FP16LayerNorm2d(dim, eps=1e-4)
             self.attn = VisFormerAttention(
                 dim, num_heads=num_heads, head_dim_ratio=head_dim_ratio,
-                qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop
+                qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
+                use_logit_clamp=use_logit_clamp
             )
 
         self.norm2 = FP16LayerNorm2d(dim, eps=1e-4)
@@ -327,13 +331,15 @@ class VisFormerFP16(nn.Module):
         attn_stage: str = '011',
         spatial_conv: str = '100',
         group: int = 8,
-        pos_embed: bool = True
+        pos_embed: bool = True,
+        use_logit_clamp: bool = True
     ):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.img_size = img_size
         self.pos_embed = pos_embed
+        self.use_logit_clamp = use_logit_clamp
 
         if isinstance(depth, (list, tuple)):
             self.stage_num1, self.stage_num2, self.stage_num3 = depth
@@ -367,7 +373,8 @@ class VisFormerFP16(nn.Module):
             VisFormerBlock(
                 dim=dim1, num_heads=num_heads, head_dim_ratio=0.5, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i],
-                group=group, attn_disabled=(attn_stage[0] == '0'), spatial_conv=(spatial_conv[0] == '1')
+                group=group, attn_disabled=(attn_stage[0] == '0'), spatial_conv=(spatial_conv[0] == '1'),
+                use_logit_clamp=self.use_logit_clamp
             )
             for i in range(self.stage_num1)
         ])
@@ -386,7 +393,8 @@ class VisFormerFP16(nn.Module):
             VisFormerBlock(
                 dim=dim2, num_heads=num_heads, head_dim_ratio=1.0, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[start_idx2 + i],
-                group=group, attn_disabled=(attn_stage[1] == '0'), spatial_conv=(spatial_conv[1] == '1')
+                group=group, attn_disabled=(attn_stage[1] == '0'), spatial_conv=(spatial_conv[1] == '1'),
+                use_logit_clamp=self.use_logit_clamp
             )
             for i in range(self.stage_num2)
         ])
@@ -405,7 +413,8 @@ class VisFormerFP16(nn.Module):
             VisFormerBlock(
                 dim=dim3, num_heads=num_heads, head_dim_ratio=1.0, mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias, drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[start_idx3 + i],
-                group=group, attn_disabled=(attn_stage[2] == '0'), spatial_conv=(spatial_conv[2] == '1')
+                group=group, attn_disabled=(attn_stage[2] == '0'), spatial_conv=(spatial_conv[2] == '1'),
+                use_logit_clamp=self.use_logit_clamp
             )
             for i in range(self.stage_num3)
         ])

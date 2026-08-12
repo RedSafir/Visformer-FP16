@@ -37,6 +37,7 @@ def get_args():
     parser.add_argument('--weight-decay', default=0.05, type=float, help='Weight decay AdamW')
     parser.add_argument('--workers', default=4, type=int, help='Jumlah worker DataLoader')
     parser.add_argument('--cache-ram', action='store_true', default=False, help='Simpan seluruh dataset gambar ke RAM untuk kecepatan maksimum')
+    parser.add_argument('--no-logit-clamp', action='store_true', default=False, help='Nonaktifkan logit clamping pada Attention untuk menguji ketahanan overflow')
     parser.add_argument('--output-dir', default='./checkpoints_fp16', type=str, help='Direktori penyimpanan checkpoint bobot model (.pth)')
     parser.add_argument('--log-dir', default='./logs_fp16', type=str, help='Direktori penyimpanan file log analisis JSON (.json)')
     parser.add_argument('--print-freq', default=200, type=int, help='Frekuensi cetak log batch (default: setiap 200 batch)')
@@ -311,10 +312,14 @@ def main():
 
     # 2. Build FP16 Model
     is_cifar = (args.data_set == 'CIFAR')
+    use_clamp = not args.no_logit_clamp
+    if not use_clamp:
+        print("[PERINGATAN] Logit Clamping DINONAKTIFKAN! Uji ketahanan overflow tanpa clamping.")
+
     if args.model == 'visformer_tiny_fp16':
-        model = visformer_tiny_fp16(num_classes=nb_classes).to(device)
+        model = visformer_tiny_fp16(num_classes=nb_classes, use_logit_clamp=use_clamp).to(device)
     elif args.model == 'visformer_small_fp16':
-        model = visformer_small_fp16(num_classes=nb_classes).to(device)
+        model = visformer_small_fp16(num_classes=nb_classes, use_logit_clamp=use_clamp).to(device)
     elif args.model == 'resnet18_fp16':
         model = resnet18_fp16(num_classes=nb_classes, is_cifar=is_cifar).to(device)
     elif args.model == 'resnet32_fp16':
