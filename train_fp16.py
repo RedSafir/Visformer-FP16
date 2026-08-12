@@ -381,17 +381,10 @@ def main():
             json.dump(history_log, f, indent=2)
         print(f"  [✓] Log riwayat pelatihan diperbarui di: {json_save_path}")
 
-        # Simpan checkpoint terbaik
+        # Lacak akurasi validasi terbaik (tanpa menyimpan file bobot .pth)
         if val_acc1 > best_acc1:
             best_acc1 = val_acc1
-            save_path = os.path.join(args.output_dir, f"{args.model}_imagenet100_best.pth")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer_wrapper.optimizer.state_dict(),
-                'best_acc1': best_acc1,
-            }, save_path)
-            print(f"  [✓] Checkpoint terbaik disimpan di: {save_path} (Val Top-1: {best_acc1:.2f}%)")
+            print(f"  [★] Rekor Val Top-1 Baru: {best_acc1:.2f}%")
 
     print(f"\n=== Pelatihan Selesai! Top-1 Akurasi Terbaik: {best_acc1:.2f}% ===")
     print(f"File log JSON lengkap untuk analisis: {json_save_path}")
